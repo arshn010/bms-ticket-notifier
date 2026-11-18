@@ -69,6 +69,9 @@ REGION_MAP = {
     "kolkata":    ("KOLK",   "kolkata",    "22.573", "88.364", "tun"),
     "pune":       ("PUNE",   "pune",       "18.520", "73.856", "te2"),
     "kochi":      ("KOCH",   "kochi",      "9.932",  "76.267", "t9z"),
+    # Ulikkal region code is taken from the user's BookMyShow theatre URL.
+    # Coordinates are approximate town-centre coordinates; geohash is precision 3.
+    "ulikkal":    ("ULLI",   "ulikkal",    "12.037", "75.670", "tdj"),
 }
 
 
@@ -121,7 +124,10 @@ def resolve_region(slug):
     key = (slug or "").lower().strip()
     if key in REGION_MAP:
         return REGION_MAP[key]
-    return (key.upper()[:6], key, "0", "0", "")
+    raise ValueError(
+        f"Unsupported BookMyShow region '{slug}'. "
+        "Add its official region code and location parameters to REGION_MAP."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -279,7 +285,8 @@ def filter_shows(shows, theatre_filter, time_periods, date_codes):
         # Theatre filter
         if kws:
             name_lower = s.venue_name.lower()
-            if not any(k in name_lower for k in kws):
+            code_lower = s.venue_code.lower()
+            if not any(k in name_lower or k in code_lower for k in kws):
                 continue
 
         # Date filter
@@ -352,8 +359,10 @@ def detect_changes(old_state, new_state):
     new_dates = new_state.get("dates", {})
     for dc, status in new_dates.items():
         old_status = old_dates.get(dc)
-        if (old_status == "NOT_OPEN"
-                and status in ("BOOKABLE", "AVAILABLE")):
+        if (
+            status in ("BOOKABLE", "AVAILABLE")
+            and (old_status == "NOT_OPEN" or old_status is None)
+        ):
             changes.append(f"📅 NEW DATE OPENED: {dc}")
 
     old_shows = old_state.get("shows", {})
@@ -538,9 +547,13 @@ def main():
         print("  ❌ Invalid BMS_URL. Could not extract event/region.")
         sys.exit(1)
 
-    region_code, region_slug_r, lat, lon, geohash = resolve_region(
-        region_slug
-    )
+    try:
+        region_code, region_slug_r, lat, lon, geohash = resolve_region(
+            region_slug
+        )
+    except ValueError as e:
+        print(f"  ❌ {e}")
+        sys.exit(1)
 
     # Determine dates to check
     raw_dates = CONFIG["dates"].strip()
@@ -559,22 +572,25 @@ def main():
     all_dates = []
     movie_info = {"name": "Unknown", "language": ""}
 
+    successful_responses = 0
     for dc in date_list:
         data = fetch_bms(event_code, dc, region_code,
                          region_slug_r, lat, lon, geohash)
-        if not data:
-            print(f"  ⚠️  No data for date {dc or '(default)'}")
+        if data is None:
+            print(f"  ⚠️  No API data for date {dc or '(default)'}")
             continue
 
+        successful_responses += 1
         if movie_info["name"] == "Unknown":
             movie_info = parse_movie_info(data)
 
+        # Date widgets can appear before any showtime cards exist.
         all_dates.extend(parse_dates(data))
         all_shows.extend(parse_shows(data))
 
-    if not all_shows:
-        print("  ❌ No showtimes found.")
-        sys.exit(0)
+    if successful_responses == 0:
+        print("  ❌ No successful BookMyShow API response. State was not changed.")
+        sys.exit(1)
 
     print(f"  🎬 {movie_info['name']}  {movie_info['language']}")
 
@@ -586,6 +602,8 @@ def main():
         CONFIG["dates"],
     )
     print(f"  📊 {len(filtered)} showtime(s) after filters")
+    if not filtered:
+        print("  ℹ️  No matching showtimes yet; continuing date/booking monitoring.")
 
     # Build state & detect changes
     new_state = build_state(filtered, all_dates)
@@ -609,6 +627,10 @@ def main():
         print("  ✅ No changes since last check.")
 
     # Print current status
+    print(f"\n  Booking dates ({len(all_dates)} found):")
+    for d in all_dates:
+        print(f"    {d.date_code}: {d.status}")
+
     print(f"\n  Current status ({len(filtered)} shows):")
     for s in filtered:
         cats = ", ".join(
